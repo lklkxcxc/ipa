@@ -1,0 +1,9 @@
+# 构建产物(镜像/ramdisk 体积大,不入库;用 build/ 下的脚本重新生成)
+dist/
+*.raw
+*.iso
+*.img
+*.initramfs
+*.kernel
+__pycache__/
+*.pyc

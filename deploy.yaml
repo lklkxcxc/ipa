@@ -1,0 +1,36 @@
+# usb-provision 装机配置
+# 放在 U 盘 config-2 分区根目录,由 ramdisk 内编排器读取
+version: 1
+
+# 目标磁盘策略
+# PoC 阶段依赖 IPA 自动选盘(get_os_install_device: 最大非可移动盘),此节预留
+target:
+  # device: /dev/sda        # 留空 = 自动
+  # disk_hints:             # 复用 IPA device_hints 语法
+  #   size: ">= 200GB"
+
+# 源镜像:放在 IPA-IMAGES 分区
+image:
+  # 注意:必须用 generic 变体(通用内核,-kvm 变体无 LSI SCSI/部分 VMware 控制器驱动,
+  # 在 VMware 上 initrdless panic 后 initramfs 也认不到盘,启动假死黑屏)。
+  # 本镜像已删除 40-force-partuuid.cfg 并重新生成 grub.cfg(正常 initrd 引导)。
+  file: jammy-server-cloudimg-amd64.img   # 镜像文件名(相对 IPA-IMAGES 分区根)
+  checksum_file: jammy-server-cloudimg-amd64.img.sha256   # 缺省自动找 <file>.sha256
+  image_type: whole-disk      # whole-disk | partition
+  disk_format: qcow2          # qcow2 | raw
+  stream_raw: false           # true 且 disk_format=raw 时直接流式写盘(省内存)
+
+# 部署前擦盘
+erase:
+  enabled: false              # true = 先执行 ATA secure erase / metadata 擦除(慢!)
+
+# configdrive(可选)
+# 方式一:预构建好的 ISO 放在 IPA-IMAGES 分区,填文件名
+# 方式二:留空则不写 configdrive
+configdrive:
+  file: configdrive.iso       # 相对 IPA-IMAGES 分区根
+
+# 完成后行为
+post:
+  shutdown: true              # 装机完成后关机
+  result_file: deploy-result.json   # 结果写回 config-2 分区

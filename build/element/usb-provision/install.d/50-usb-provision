@@ -1,0 +1,128 @@
+#!/bin/bash
+# 安装 usb-provision 编排器与 systemd 服务到 ramdisk
+# 编排器文件由 extra-data.d 拷到 /tmp/usb-provision-orchestrator.py
+set -euo pipefail
+
+DEST=/usr/local/lib/usb-provision
+mkdir -p $DEST
+cp /tmp/usb-provision-orchestrator.py $DEST/orchestrator.py
+rm -f /tmp/usb-provision-orchestrator.py
+
+# ---- IPA 补丁:get_os_install_device 支持 usb-provision 目标盘提示文件 ----
+# standalone 模式下 IPA 无 root device hints,guess_root_disk 只取最大的盘,
+# 会把 U 盘自己当成装机盘。编排器把选定目标写到 /run/usb-provision/target-device,
+# 此补丁让 IPA 优先读取它(文件不存在时行为不变)。
+python3 - <<'PYEOF'
+import glob, re
+paths = glob.glob('/opt/ironic-python-agent/lib/python3*/site-packages/'
+                  'ironic_python_agent/hardware.py')
+assert len(paths) == 1, paths
+p = paths[0]
+src = open(p).read()
+old = """        if not root_device_hints:
+            dev_name = utils.guess_root_disk(block_devices).name"""
+new = """        if not root_device_hints:
+            # usb-provision: orchestrator writes the chosen target disk to a
+            # hint file; prefer it over the largest-disk guess (standalone
+            # mode has no Ironic root hints and the boot medium is a ramdisk,
+            # so IPA cannot exclude the USB stick by itself).
+            hint_file = '/run/usb-provision/target-device'
+            if os.path.exists(hint_file):
+                with open(hint_file) as f:
+                    hinted = f.read().strip()
+                if hinted:
+                    if not hinted.startswith('/'):
+                        hinted = '/dev/' + hinted
+                    LOG.info('Picked root device %s from usb-provision '
+                             'hint file %s', hinted, hint_file)
+                    return hinted
+            dev_name = utils.guess_root_disk(block_devices).name"""
+assert src.count(old) == 1, 'pattern not unique in %s' % p
+open(p, 'w').write(src.replace(old, new))
+print('usb-provision: hardware.py 目标盘提示补丁已应用:', p)
+PYEOF
+
+
+cat > /usr/local/bin/usb-provision <<'EOF'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/usb-provision/orchestrator.py
+EOF
+chmod 0755 /usr/local/bin/usb-provision
+
+# ---- 配置下发服务:IPA 启动前把 config-2 上的 agent 配置拷入 ramdisk ----
+# (IPA 以 --config-dir /etc/ironic-python-agent.d/ 启动;Type=oneshot 且
+#  Before=ironic-python-agent.service,systemd 会等本服务结束后再拉起 IPA)
+cat > /usr/local/bin/usb-provision-agent-config <<'EOF'
+#!/bin/sh
+set -eu
+MP=/run/usb-provision-config
+# USB 枚举可能晚于本服务启动,轮询等待 config-2 出现(最多 30s)
+DEV=
+i=0
+while [ $i -lt 30 ]; do
+    DEV=$(findfs LABEL=config-2 2>/dev/null || true)
+    [ -n "$DEV" ] && break
+    i=$((i+1))
+    sleep 1
+done
+if [ -z "$DEV" ]; then
+    echo "usb-provision: 30s 内未发现 config-2 分区,跳过拷贝(使用 ramdisk 内置配置)"
+    exit 0
+fi
+mkdir -p "$MP"
+mount -o ro "$DEV" "$MP"
+if [ -d "$MP/etc/ironic-python-agent.d" ]; then
+    mkdir -p /etc/ironic-python-agent.d
+    cp -a "$MP/etc/ironic-python-agent.d/." /etc/ironic-python-agent.d/
+    echo "usb-provision: agent 配置已从 config-2 拷入 /etc/ironic-python-agent.d"
+fi
+umount "$MP"
+rmdir "$MP"
+EOF
+chmod 0755 /usr/local/bin/usb-provision-agent-config
+
+# 预共享 agent_token 直接烧进 ramdisk:新版 IPA 命令端点强制校验,
+# 若上面的拷贝服务因 USB 枚举慢而失败,IPA 无 token 启动会导致所有命令 401。
+# 此内置配置是兜底,config-2 上的同名文件可覆盖它。
+mkdir -p /etc/ironic-python-agent.d
+cat > /etc/ironic-python-agent.d/agent.conf <<'EOF'
+[DEFAULT]
+agent_token = usb-provision-poc-0123456789abcdef0123456789abcdef
+EOF
+
+cat > /etc/systemd/system/usb-provision-config.service <<'EOF'
+[Unit]
+Description=Copy agent config from usb config-2 partition
+Before=ironic-python-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/usb-provision-agent-config
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/usb-provision.service <<'EOF'
+[Unit]
+Description=usb-provision local deploy orchestrator
+# IPA 服务就绪后再开始装机
+After=ironic-python-agent.service
+Requires=ironic-python-agent.service
+
+[Service]
+Type=oneshot
+# 装机结束 poweroff;失败时退出码非 0,systemd 停在这里便于现场排障
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/usb-provision
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ramdisk 内 systemd:启用服务
+[[ -x /bin/systemctl ]] && systemctl enable usb-provision.service usb-provision-config.service

@@ -1,0 +1,7 @@
+#!/bin/bash
+# extra-data.d 在宿主机上运行:把编排器拷进镜像构建目录
+# 供 install.d 阶段在 chroot 内使用
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cp -v "${SCRIPT_DIR}/../orchestrator.py" "${TMP_MOUNT_PATH}/tmp/usb-provision-orchestrator.py"
